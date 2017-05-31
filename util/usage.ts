@@ -33,69 +33,69 @@ import * as ts from 'typescript';
 class Scope {
     public functionScope: Scope;
     public variables = new Map<string, VariableInfo>();
-    public types = new Map<string, TypeInfo>();
-    public usedVariables = new Set<string>();
-    public usedTypes = new Set<string>();
+    public usedValues = new Map<string, ts.Identifier[]>();
+    public usedTypes = new Map<string, ts.Identifier[]>();
     constructor(functionScope?: Scope) {
         // if no functionScope is provided we are in the process of creating a new function scope, which for consistency links to itself
         this.functionScope = functionScope || this;
     }
 
-    public addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, info: AdditionalVariableInfo) {
+    public addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, exported: boolean, domain: Domain) {
         const scope = blockScoped ? this : this.functionScope;
-        scope.variables.set(identifier, {
-            name,
-            info,
-            used: false,
-        });
+        let variable = scope.variables.get(identifier);
+        if (variable === undefined) {
+            variable = {
+                domain,
+                exported,
+                declarations: [name],
+                uses: [],
+            };
+            scope.variables.set(identifier, variable);
+        } else {
+            variable.domain |= domain;
+            variable.declarations.push(name);
+        }
     }
 
-    public addType(name: ts.Identifier, info: AdditionalTypeInfo) {
-        this.types.set(name.text, {
-            name,
-            info,
-            used: false,
-        });
+    public addUse(identifier: ts.Identifier, domain: Domain) {
+        addToList(identifier, (domain & Domain.Value) ? this.usedValues : this.usedTypes);
     }
 }
 
-interface VariableInfo {
-    name: ts.PropertyName;
-    info: AdditionalVariableInfo;
-    used: boolean;
+function addToList(identifier: ts.Identifier, map: Map<string, ts.Identifier[]>) {
+    const list = map.get(identifier.text);
+    if (list === undefined) {
+        map.set(identifier.text, [identifier]);
+    } else {
+        list.push(identifier);
+    }
 }
 
-interface TypeInfo {
-    name: ts.Identifier;
-    info: AdditionalTypeInfo;
-    used: boolean;
-}
-
-interface AdditionalVariableInfo {
-    type: 'import' | 'variable' | 'parameter' | 'class' | 'function' | 'enum' | 'namespace' | 'enumMember';
+export interface VariableInfo {
+    domain: Domain;
+    declarations: ts.PropertyName[];
     exported: boolean;
+    uses: VariableUse[];
 }
 
-interface AdditionalTypeInfo {
-    type: 'import' | 'class' | 'typeParameter' | 'interface' | 'type' | 'enum';
-    exported: boolean;
+export interface VariableUse {
+    domain: Domain;
+    location: ts.Identifier;
 }
 
-const enum UsageDomain {
-    None,
-    Type,
-    Variable,
+export const enum Domain {
+    Value = 1,
+    Type = 2,
 }
 
-function getUsageDomain(node: ts.Identifier): UsageDomain {
-    if (isTypeUsage(node))
-        return UsageDomain.Type;
+export function getUsageDomain(node: ts.Identifier): Domain | undefined {
+    if (isUsedAsType(node))
+        return Domain.Type;
     if (isVariableUsage(node))
-        return UsageDomain.Variable;
-    return UsageDomain.None;
+        return Domain.Value;
 }
 
-function isTypeUsage(node: ts.Identifier): boolean {
+export function isUsedAsType(node: ts.Identifier): boolean {
     const parent = node.parent!;
     switch (parent.kind) {
         case ts.SyntaxKind.TypeReference:
@@ -109,6 +109,10 @@ function isTypeUsage(node: ts.Identifier): boolean {
         default:
             return false;
     }
+}
+
+export function isUsedAsValue(node: ts.Identifier): boolean {
+    return !isUsedAsType(node) && isVariableUsage(node);
 }
 
 function isVariableUsage(node: ts.Identifier): boolean {
@@ -158,9 +162,14 @@ function isVariableUsage(node: ts.Identifier): boolean {
     }
 }
 
-class UnusedWalker {
+export function collectVariableUsage(sourceFile: ts.SourceFile) {
+    return new UsageWalker().getUsage(sourceFile);
+}
+
+class UsageWalker {
+    private _result = new Map<ts.PropertyName, VariableInfo>();
     private _scope: Scope;
-    public walk(sourceFile: ts.SourceFile) {
+    public getUsage(sourceFile: ts.SourceFile) {
         this._scope = new Scope();
         const cb = (node: ts.Node): void => {
             if (isJsDocKind(node.kind))
@@ -170,13 +179,13 @@ class UnusedWalker {
             if (boundary !== ScopeBoundary.None) {
                 if (boundary === ScopeBoundary.Function) {
                     if (isFunctionDeclaration(node) && node.body !== undefined ||
-                        isFunctionExpression(node)) {
-                        this._handleDeclaration(node, false, 'function');
+                        isFunctionExpression(node)) { // TODO add another scope for FunctionExpression
+                        this._handleDeclaration(node, false, Domain.Value);
                     } else if (isEnumDeclaration(node)) {
-                        this._handleDeclaration(node, true, 'enum');
+                        this._handleDeclaration(node, true, Domain.Type | Domain.Type);
                     } else if (isClassLikeDeclaration(node)) {
-                        this._handleDeclaration(node, true, 'class');
-                    }// else if (isModuleDeclaration(node) && node.name.kind === ts.SyntaxKind.Identifier)
+                        this._handleDeclaration(node, true, Domain.Value & Domain.Type);
+                    }// TODO else if (isModuleDeclaration(node) && node.name.kind === ts.SyntaxKind.Identifier)
                      //       this._handleDeclaration(node, false, 'namespace');
                     this._scope = new Scope();
                 } else {
@@ -186,7 +195,7 @@ class UnusedWalker {
             if (node.kind === ts.SyntaxKind.VariableDeclarationList) {
                 this._handleVariableDeclaration(<ts.VariableDeclarationList>node);
             } else if (node.kind === ts.SyntaxKind.CatchClause) {
-                this._handleBindingName((<ts.CatchClause>node).variableDeclaration.name, true, 'variable', true);
+                this._handleBindingName((<ts.CatchClause>node).variableDeclaration.name, true, true);
             } else if (isParameterDeclaration(node)) {
                 const parent = node.parent!;
                 // don't handle parameters of overloads or other signatures
@@ -196,30 +205,22 @@ class UnusedWalker {
                     (node.name.kind !== ts.SyntaxKind.Identifier || node.name.originalKeywordKind !== ts.SyntaxKind.ThisKeyword) ||
                     parent.kind === ts.SyntaxKind.ArrowFunction ||
                     parent.kind === ts.SyntaxKind.Constructor) {
-                    this._handleBindingName(node.name, false, 'parameter', isParameterProperty(node));
+                    this._handleBindingName(node.name, false, isParameterProperty(node));
                     // special handling for parameters
                     // each parameter initializer can only access preceding parameters, therefore we need to settle after each one
                     ts.forEachChild(node, cb);
                     return this._settle(savedScope);
                 }
             } else if (isEnumMember(node)) {
-                this._scope.addVariable(getPropertyName(node.name)!, node.name, false, {
-                    type: 'enumMember',
-                    exported: true,
-                });
+                this._scope.addVariable(getPropertyName(node.name)!, node.name, false, true, Domain.Value);
             } else if (isImportClause(node) || isImportSpecifier(node) || isNamespaceImport(node) || isImportEqualsDeclaration(node)) {
-                this._handleDeclaration(node, false, 'import');
+                this._handleDeclaration(node, false, Domain.Type | Domain.Value);
             } else if (isInterfaceDeclaration(node) || isTypeAliasDeclaration(node) || isTypeParameterDeclaration(node)) {
-                this._handleType(node);
+                this._handleDeclaration(node, true, Domain.Type);
             } else if (isIdentifier(node)) {
-                switch (getUsageDomain(node)) {
-                    case UsageDomain.Variable:
-                        this._scope.usedVariables.add(node.text);
-                        break;
-                    case UsageDomain.Type:
-                        this._scope.usedTypes.add(node.text);
-                        break;
-                }
+                const domain = getUsageDomain(node);
+                if (domain !== undefined)
+                    this._scope.addUse(node, domain);
             }
 
             if (boundary) {
@@ -230,66 +231,26 @@ class UnusedWalker {
             }
         };
 
-        if (ts.isExternalModule(sourceFile)) {
-            ts.forEachChild(sourceFile, cb);
+        ts.forEachChild(sourceFile, cb);
+        if (ts.isExternalModule(sourceFile))
             this._onScopeEnd();
-        } else {
-            return ts.forEachChild(sourceFile, cb);
-        }
+        return this._result;
     }
 
-    private _handleDeclaration(node: ts.FunctionDeclaration | ts.FunctionExpression | ts.EnumDeclaration | ts.ClassLikeDeclaration |
-                                     ts.ImportClause | ts.ImportSpecifier | ts.NamespaceImport | ts.ImportEqualsDeclaration,
-                               blockScoped: boolean,
-                               type: 'enum' | 'class' | 'function' | 'import' ) {
-        if (node.name !== undefined) {
-            this._scope.addVariable(node.name.text, node.name, blockScoped, {
-                type,
-                exported: hasModifier(node.modifiers, ts.SyntaxKind.ExportKeyword),
-            });
-            if (isCrossDomain(type))
-                this._scope.addType(node.name, {
-                    type,
-                    exported: hasModifier(node.modifiers, ts.SyntaxKind.ExportKeyword),
-                });
-        }
-    }
-
-    private _handleType(node: ts.TypeAliasDeclaration | ts.InterfaceDeclaration | ts.TypeParameterDeclaration) {
-        let type: 'type' | 'typeParameter' | 'interface';
-        switch (node.kind) {
-            case ts.SyntaxKind.InterfaceDeclaration:
-                type = 'interface';
-                break;
-            case ts.SyntaxKind.TypeParameter:
-                type = 'typeParameter';
-                break;
-            default:
-                type = 'type';
-                break;
-        }
-        this._scope.addType(node.name, {
-            type,
-            exported: hasModifier(node.modifiers, ts.SyntaxKind.ExportKeyword) ||
-                node.kind === ts.SyntaxKind.TypeParameter && node.parent!.kind === ts.SyntaxKind.MappedType,
-        });
+    private _handleDeclaration(node: ts.NamedDeclaration, blockScoped: boolean, domain: Domain ) {
+        if (node.name !== undefined)
+            this._scope.addVariable((<ts.Identifier>node.name).text, <ts.Identifier>node.name, blockScoped,
+                                    hasModifier(node.modifiers, ts.SyntaxKind.ExportKeyword), domain);
     }
 
     private _handleBindingName(name: ts.BindingName,
                                blockScoped: boolean,
-                               type: 'variable' | 'parameter',
                                exported: boolean) {
         if (name.kind === ts.SyntaxKind.Identifier) {
-            this._scope.addVariable(name.text, name, blockScoped, {
-                type,
-                exported,
-            });
+            this._scope.addVariable(name.text, name, blockScoped, exported, Domain.Value);
         } else {
             forEachDestructuringIdentifier(name, (declaration) => {
-                this._scope.addVariable(declaration.name.text, declaration.name, blockScoped, {
-                    exported,
-                    type: 'variable',
-                });
+                this._scope.addVariable(declaration.name.text, declaration.name, blockScoped, exported, Domain.Value);
             });
         }
     }
@@ -298,61 +259,50 @@ class UnusedWalker {
         const blockScoped = isBlockScopedVariableDeclarationList(declarationList);
         const exported = declarationList.parent!.kind === ts.SyntaxKind.VariableStatement &&
             hasModifier(declarationList.parent!.modifiers, ts.SyntaxKind.ExportKeyword);
-        for (const declaration of declarationList.declarations) {
-            this._handleBindingName(declaration.name, blockScoped, 'variable', exported);
-        }
+        for (const declaration of declarationList.declarations)
+            this._handleBindingName(declaration.name, blockScoped, exported);
     }
 
     private _onScopeEnd(parent?: Scope) {
         this._settle(parent);
-        this._scope.variables.forEach((variable, name) => {
-            if (!variable.used &&
-                !variable.info.exported)
-                this.addFailureAtNode(variable.name, `Unused ${variable.info.type}: '${name}'`);
-        });
-        this._scope.types.forEach((type, name) => {
-            if (!type.used &&
-                !type.info.exported &&
-                !isCrossDomain(type.info.type))
-                this.addFailureAtNode(type.name, `Unused ${type.info.type}: '${name}'`);
+        this._scope.variables.forEach((value) => {
+            for (const declaration of value.declarations)
+                this._result.set(declaration, value);
         });
         if (parent !== undefined)
             this._scope = parent;
     }
 
     private _settle(parent?: Scope) {
-        const {variables, types, usedVariables, usedTypes} = this._scope;
-        usedTypes.forEach((name) => {
-            const type = types.get(name);
-            if (type !== undefined) {
-                type.used = true;
-                if (isCrossDomain(type.info.type))
-                    variables.get(name)!.used = true;
-            } else if (parent !== undefined) {
-                parent.usedTypes.add(name);
-            }
-        });
-        usedVariables.forEach((name) => {
+        const {variables, usedValues, usedTypes} = this._scope;
+        // TODO can be moved to _onScopeEnd
+        usedTypes.forEach((uses, name) => {
             const variable = variables.get(name);
-            if (variable !== undefined) {
-                variable.used = true;
-                if (isCrossDomain(variable.info.type))
-                    types.get(name)!.used = true;
+            if (variable !== undefined && variable.domain & Domain.Type) {
+                for (const use of uses)
+                    variable.uses.push( {
+                        domain: Domain.Type,
+                        location: use,
+                    });
             } else if (parent !== undefined) {
-                parent.usedVariables.add(name);
+                for (const use of uses)
+                    addToList(use, parent.usedTypes);
             }
         });
-        usedVariables.clear();
-    }
-}
-
-function isCrossDomain(type: string): type is 'class' | 'enum' | 'import' {
-    switch (type) {
-        case 'class':
-        case 'enum':
-        case 'import':
-            return true;
-        default:
-            return false;
+        usedValues.forEach((uses, name) => {
+            const variable = variables.get(name);
+            if (variable !== undefined && variable.domain & Domain.Value) {
+                for (const use of uses)
+                    variable.uses.push( {
+                        domain: Domain.Value,
+                        location: use,
+                    });
+            } else if (parent !== undefined) {
+                for (const use of uses)
+                    addToList(use, parent.usedValues);
+            }
+        });
+        usedValues.clear();
+        usedTypes.clear();
     }
 }
