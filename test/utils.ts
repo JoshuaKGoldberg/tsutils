@@ -5,14 +5,25 @@ import { isTokenKind } from '../util';
 
 export function findTestFiles(dir: string) {
     const result = fs.readdirSync(dir);
-    for (let i = 0; i < result.length; ++i) {
+    for (let i = 0; i < result.length; ++i)
         result[i] = path.join(dir, result[i]);
-    }
     return result;
 }
 
 export function getSourceFile(fileName: string) {
-    return ts.createSourceFile(fileName, fs.readFileSync(fileName, 'utf-8'), ts.ScriptTarget.ESNext, true);
+    return ts.createSourceFile(fileName, fs.readFileSync(fileName, 'utf-8'), ts.ScriptTarget.ESNext, true, fileNameToScriptKind(fileName));
+}
+
+function fileNameToScriptKind(fileName: string): ts.ScriptKind {
+    if (fileName.endsWith('.ts'))
+        return ts.ScriptKind.TS;
+    if (fileName.endsWith('.js'))
+        return ts.ScriptKind.JS;
+    if (fileName.endsWith('.tsx'))
+        return ts.ScriptKind.TSX;
+    if (fileName.endsWith('.jsx'))
+        return ts.ScriptKind.JSX;
+    return ts.ScriptKind.Unknown;
 }
 
 export function getFirstToken(sourceFile: ts.SourceFile) {
@@ -21,12 +32,10 @@ export function getFirstToken(sourceFile: ts.SourceFile) {
 
 function getFirstTokenWorker(current: ts.Node, sourceFile: ts.SourceFile): ts.Node | undefined {
     for (const child of current.getChildren(sourceFile)) {
-        if (isTokenKind(child.kind)) {
+        if (isTokenKind(child.kind))
             return child;
-        }
         const result = getFirstTokenWorker(child, sourceFile);
-        if (result !== undefined) {
+        if (result !== undefined)
             return result;
-        }
     }
 }

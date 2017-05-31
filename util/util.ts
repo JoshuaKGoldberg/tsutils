@@ -96,44 +96,84 @@ export function getPreviousToken(node: ts.Node, sourceFile?: ts.SourceFile) {
         parent = parent.parent;
     if (parent === undefined)
         return;
-    return findPreviousInternal(parent, node.pos, sourceFile);
-}
-
-function findPreviousInternal(node: ts.Node, pos: number, sourceFile?: ts.SourceFile): ts.Node | undefined {
-    const children = node.getChildren(sourceFile);
-    for (let i = children.length - 1; i >= 0; --i) {
-        const child = children[i];
-        if (child.pos < pos && child.kind !== ts.SyntaxKind.JSDocComment) {
-            if (isTokenKind(child.kind))
-                return child;
-            // previous token is nested in another node
-            return findPreviousInternal(child, pos, sourceFile);
+    outer: while (true) {
+        const children = parent.getChildren(sourceFile);
+        for (let i = children.length - 1; i >= 0; --i) {
+            const child = children[i];
+            if (child.pos < node.pos && child.kind !== ts.SyntaxKind.JSDocComment) {
+                if (isTokenKind(child.kind))
+                    return child;
+                // previous token is nested in another node
+                parent = child;
+                continue outer;
+            }
         }
+        return;
     }
 }
 
 /** Returns the next token that begins after the end of `node`. Returns `undefined` for SourceFile and EndOfFileToken */
-export function getNextToken(node: ts.Node, sourceFile?: ts.SourceFile) {
+export function getNextToken(node: ts.Node, sourceFile = node.getSourceFile()) {
     if (node.kind === ts.SyntaxKind.SourceFile || node.kind === ts.SyntaxKind.EndOfFileToken)
         return;
-    let parent = node.parent!;
-    while (parent.end === node.end) {
-        if (parent.parent === undefined)
-            return (<ts.SourceFile>parent).endOfFileToken;
-        parent = parent.parent;
+    const end = node.end;
+    node = node.parent!;
+    while (node.end === end) {
+        if (node.parent === undefined)
+            return (<ts.SourceFile>node).endOfFileToken;
+        node = node.parent;
     }
-    return findNextInternal(parent, node.end, sourceFile);
+    return getTokenAtPositionWorker(node, end + 1, sourceFile);
 }
 
-function findNextInternal(node: ts.Node, end: number, sourceFile?: ts.SourceFile): ts.Node | undefined {
-    for (const child of node.getChildren(sourceFile)) {
-        if (child.end > end && child.kind !== ts.SyntaxKind.JSDocComment) {
-            if (isTokenKind(child.kind))
-                return child;
-            // next token is nested in another node
-            return findNextInternal(child, end, sourceFile);
+/** Returns the token at or following the specified position or undefined if none is found inside `parent`. */
+export function getTokenAtPosition(parent: ts.Node, pos: number, sourceFile?: ts.SourceFile) {
+    if (pos < parent.pos || pos > parent.end)
+        return;
+    if (isTokenKind(parent.kind))
+        return parent;
+    if (sourceFile === undefined)
+        sourceFile = parent.getSourceFile();
+    return getTokenAtPositionWorker(parent, pos, sourceFile);
+}
+
+function getTokenAtPositionWorker(node: ts.Node, pos: number, sourceFile: ts.SourceFile) {
+    outer: while (true) {
+        for (const child of node.getChildren(sourceFile)) {
+            if (child.end >= pos && child.kind !== ts.SyntaxKind.JSDocComment) {
+                if (isTokenKind(child.kind))
+                    return child;
+                // next token is nested in another node
+                node = child;
+                continue outer;
+            }
         }
+        return;
     }
+}
+
+/**
+ * Return the comment at the specified position.
+ * You can pass an optional `parent` to avoid some work finding the corresponding token starting at `sourceFile`.
+ * If the `parent` parameter is passed, `pos` must be between `parent.pos` and `parent.end`.
+*/
+export function getCommentAtPosition(sourceFile: ts.SourceFile, pos: number, parent: ts.Node = sourceFile): ts.CommentRange | undefined {
+    const token = getTokenAtPosition(parent, pos, sourceFile);
+    if (token === undefined || token.kind === ts.SyntaxKind.JsxText || pos >= token.end - (ts.tokenToString(token.kind) || '').length)
+        return;
+    const cb = (start: number, end: number, kind: ts.CommentKind): ts.CommentRange | undefined => pos >= start && pos < end
+        ? {end, kind, pos: start} : undefined;
+    return  token.pos !== 0 && ts.forEachTrailingCommentRange(sourceFile.text, token.pos, cb) ||
+        ts.forEachLeadingCommentRange(sourceFile.text, token.pos, cb);
+}
+
+/**
+ * Returns whether the specified position is inside a comment.
+ * You can pass an optional `parent` to avoid some work finding the corresponding token starting at `sourceFile`.
+ * If the `parent` parameter is passed, `pos` must be between `parent.pos` and `parent.end`.
+ */
+export function isPositionInComment(sourceFile: ts.SourceFile, pos: number, parent?: ts.Node): boolean {
+    return getCommentAtPosition(sourceFile, pos, parent) !== undefined;
 }
 
 export function getPropertyName(propertyName: ts.PropertyName): string | undefined {
@@ -372,8 +412,8 @@ export function forEachComment(node: ts.Node, cb: ForEachCommentCallback, source
                 return ts.forEachTrailingCommentRange(fullText, token.end, commentCallback);
         },
         sourceFile);
-    function commentCallback(pos: number, end: number, kind: ts.CommentRange['kind']) {
-        return cb(fullText, {pos, end, kind});
+    function commentCallback(pos: number, end: number, kind: ts.CommentKind) {
+        cb(fullText, {pos, end, kind});
     }
 }
 
@@ -510,17 +550,15 @@ export function isValidIdentifier(text: string): boolean {
 export function isValidPropertyAccess(text: string): boolean {
     if (!ts.isIdentifierStart(text.charCodeAt(0), ts.ScriptTarget.Latest))
         return false;
-    for (let i = 1; i < text.length; ++i) {
+    for (let i = 1; i < text.length; ++i)
         if (!ts.isIdentifierPart(text.charCodeAt(i), ts.ScriptTarget.Latest))
             return false;
-    }
     return true;
 }
 
 export function isValidPropertyName(text: string) {
-    if (isValidPropertyAccess(text)) {
+    if (isValidPropertyAccess(text))
         return true;
-    }
     const scan = scanToken(text);
     return scan.getTextPos() === text.length &&
         scan.getToken() === ts.SyntaxKind.NumericLiteral && scan.getTokenValue() === text; // ensure stringified number equals literal
@@ -537,10 +575,10 @@ export function isSameLine(sourceFile: ts.SourceFile, pos1: number, pos2: number
 }
 
 export const enum SideEffectOptions {
-    None,
-    TaggedTemplate,
-    Constructor,
-    JsxElement,
+    None = 0,
+    TaggedTemplate = 1,
+    Constructor = 2,
+    JsxElement = 4,
 }
 
 export function hasSideEffects(node: ts.Expression, options?: SideEffectOptions): boolean {
