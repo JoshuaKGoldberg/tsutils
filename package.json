@@ -6,7 +6,7 @@
     "compile": "rm -rf {,util,typeguard,src,test}/*.js; tsc -p .",
     "lint": "tslint -p ./tsconfig.json",
     "lint:fix": "tslint --fix -p ./tsconfig.json",
-    "test": "mocha test/*Tests.js",
+    "test": "mocha test/*Tests.js; tslint --test test/rules/*/tslint.json",
     "verify": "npm run compile && npm run lint && npm run coverage",
     "prepublish": "npm run verify",
     "coverage": "rm -rf coverage .nyc_output && nyc npm test",

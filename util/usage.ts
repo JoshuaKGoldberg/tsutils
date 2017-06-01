@@ -20,7 +20,6 @@ import {
     isParameterProperty,
     getPropertyName,
     isBlockScopedVariableDeclarationList,
-    isJsDocKind,
     isScopeBoundary,
     ScopeBoundary,
     hasModifier,
@@ -187,8 +186,6 @@ class UsageWalker {
     public getUsage(sourceFile: ts.SourceFile) {
         this._scope = new Scope();
         const cb = (node: ts.Node): void => {
-            if (isJsDocKind(node.kind))
-                return;
             const savedScope = this._scope;
             const boundary = isScopeBoundary(node);
             if (boundary !== ScopeBoundary.None) {
