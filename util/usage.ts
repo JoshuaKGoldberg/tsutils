@@ -6,7 +6,7 @@ import {
     isEnumMember,
     isFunctionDeclaration,
     isFunctionExpression,
-    isMethodDeclaration,
+    isModuleDeclaration,
     isClassLikeDeclaration,
     isEnumDeclaration,
     isIdentifier,
@@ -24,11 +24,16 @@ import {
     isScopeBoundary,
     ScopeBoundary,
     hasModifier,
+    isFunctionWithBody,
 } from './util';
 import * as ts from 'typescript';
 
 // TODO handle open ended namespaces and enums
 // TODO special handling of anything exported from namespace?
+// TODO handle use before delcare in typeof for parameters:
+// function fn(foo: typeof bar, bar: typeof baz, baz: typeof bas) {
+//     let bas: boolean;
+// }
 
 class Scope {
     public functionScope: Scope;
@@ -71,6 +76,16 @@ function addToList(identifier: ts.Identifier, map: Map<string, ts.Identifier[]>)
     }
 }
 
+function addToAllList(identifiers: ts.Identifier[], map: Map<string, ts.Identifier[]>) {
+    const name = identifiers[0].text;
+    const list = map.get(name);
+    if (list === undefined) {
+        map.set(name, [...identifiers]);
+    } else {
+        list.push(...identifiers);
+    }
+}
+
 export interface VariableInfo {
     domain: Domain;
     declarations: ts.PropertyName[];
@@ -91,7 +106,7 @@ export const enum Domain {
 export function getUsageDomain(node: ts.Identifier): Domain | undefined {
     if (isUsedAsType(node))
         return Domain.Type;
-    if (isVariableUsage(node))
+    if (isValueUsage(node))
         return Domain.Value;
 }
 
@@ -112,10 +127,10 @@ export function isUsedAsType(node: ts.Identifier): boolean {
 }
 
 export function isUsedAsValue(node: ts.Identifier): boolean {
-    return !isUsedAsType(node) && isVariableUsage(node);
+    return !isUsedAsType(node) && isValueUsage(node);
 }
 
-function isVariableUsage(node: ts.Identifier): boolean {
+function isValueUsage(node: ts.Identifier): boolean {
     const parent = node.parent!;
     switch (parent.kind) {
         case ts.SyntaxKind.BindingElement:
@@ -178,15 +193,29 @@ class UsageWalker {
             const boundary = isScopeBoundary(node);
             if (boundary !== ScopeBoundary.None) {
                 if (boundary === ScopeBoundary.Function) {
-                    if (isFunctionDeclaration(node) && node.body !== undefined ||
-                        isFunctionExpression(node)) { // TODO add another scope for FunctionExpression
+                    if (isFunctionExpression(node) && node.name !== undefined) {
+                        // special handling for function expression
+                        // named function expressions are only available inside the function, but declared variables shadow the name
+                        // instead of merging
+                        // therefore we need to add another scope layer only for the name of the function expression
+                        const scope = this._scope;
+                        const functionScope = this._scope = new Scope();
+                        this._scope.addVariable(node.name.text, node.name, false, false, Domain.Value);
+                        this._scope = new Scope();
+                        ts.forEachChild(node, cb);
+                        this._onScopeEnd(functionScope);
+                        this._onScopeEnd(scope);
+                        return;
+                    }
+                    if (isFunctionDeclaration(node) && node.body !== undefined) {
                         this._handleDeclaration(node, false, Domain.Value);
                     } else if (isEnumDeclaration(node)) {
                         this._handleDeclaration(node, true, Domain.Type | Domain.Type);
                     } else if (isClassLikeDeclaration(node)) {
                         this._handleDeclaration(node, true, Domain.Value & Domain.Type);
-                    }// TODO else if (isModuleDeclaration(node) && node.name.kind === ts.SyntaxKind.Identifier)
-                     //       this._handleDeclaration(node, false, 'namespace');
+                    } else if (isModuleDeclaration(node) && node.name.kind === ts.SyntaxKind.Identifier) {
+                        this._handleNamespace(<ts.NamespaceDeclaration>node);
+                    }
                     this._scope = new Scope();
                 } else {
                     this._scope = new Scope(this._scope.functionScope);
@@ -199,12 +228,9 @@ class UsageWalker {
             } else if (isParameterDeclaration(node)) {
                 const parent = node.parent!;
                 // don't handle parameters of overloads or other signatures
-                if (((isMethodDeclaration(parent) || isFunctionDeclaration(parent)) && parent.body !== undefined ||
-                     parent.kind === ts.SyntaxKind.FunctionExpression) &&
+                if (isFunctionWithBody(parent) &&
                      // exclude this parameter
-                    (node.name.kind !== ts.SyntaxKind.Identifier || node.name.originalKeywordKind !== ts.SyntaxKind.ThisKeyword) ||
-                    parent.kind === ts.SyntaxKind.ArrowFunction ||
-                    parent.kind === ts.SyntaxKind.Constructor) {
+                    (node.name.kind !== ts.SyntaxKind.Identifier || node.name.originalKeywordKind !== ts.SyntaxKind.ThisKeyword)) {
                     this._handleBindingName(node.name, false, isParameterProperty(node));
                     // special handling for parameters
                     // each parameter initializer can only access preceding parameters, therefore we need to settle after each one
@@ -237,6 +263,15 @@ class UsageWalker {
         return this._result;
     }
 
+    private _handleNamespace(node: ts.NamespaceDeclaration) {
+        this._scope.addVariable(
+            node.name.text,
+            node.name,
+            false,
+            node.parent!.kind === ts.SyntaxKind.ModuleDeclaration || hasModifier(node.modifiers, ts.SyntaxKind.ExportKeyword),
+            Domain.Value);
+    }
+
     private _handleDeclaration(node: ts.NamedDeclaration, blockScoped: boolean, domain: Domain ) {
         if (node.name !== undefined)
             this._scope.addVariable((<ts.Identifier>node.name).text, <ts.Identifier>node.name, blockScoped,
@@ -265,17 +300,7 @@ class UsageWalker {
 
     private _onScopeEnd(parent?: Scope) {
         this._settle(parent);
-        this._scope.variables.forEach((value) => {
-            for (const declaration of value.declarations)
-                this._result.set(declaration, value);
-        });
-        if (parent !== undefined)
-            this._scope = parent;
-    }
-
-    private _settle(parent?: Scope) {
-        const {variables, usedValues, usedTypes} = this._scope;
-        // TODO can be moved to _onScopeEnd
+        const {variables, usedTypes} = this._scope;
         usedTypes.forEach((uses, name) => {
             const variable = variables.get(name);
             if (variable !== undefined && variable.domain & Domain.Type) {
@@ -284,11 +309,20 @@ class UsageWalker {
                         domain: Domain.Type,
                         location: use,
                     });
-            } else if (parent !== undefined) {
-                for (const use of uses)
-                    addToList(use, parent.usedTypes);
+            } else if (parent !== undefined && uses.length !== 0) {
+                addToAllList(uses, parent.usedTypes);
             }
         });
+        variables.forEach((value) => {
+            for (const declaration of value.declarations)
+                this._result.set(declaration, value);
+        });
+        if (parent !== undefined)
+            this._scope = parent;
+    }
+
+    private _settle(parent?: Scope) {
+        const {variables, usedValues} = this._scope;
         usedValues.forEach((uses, name) => {
             const variable = variables.get(name);
             if (variable !== undefined && variable.domain & Domain.Value) {
@@ -297,12 +331,10 @@ class UsageWalker {
                         domain: Domain.Value,
                         location: use,
                     });
-            } else if (parent !== undefined) {
-                for (const use of uses)
-                    addToList(use, parent.usedValues);
+            } else if (parent !== undefined && uses.length !== 0) {
+                addToAllList(uses, parent.usedValues);
             }
         });
         usedValues.clear();
-        usedTypes.clear();
     }
 }
