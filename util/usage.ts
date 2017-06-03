@@ -39,7 +39,7 @@ class Scope {
     public functionScope: Scope;
     public variables = new Map<string, VariableInfo>();
     public uses: VariableUse[] = [];
-    constructor(functionScope?: Scope) {
+    constructor(public parent?: Scope, functionScope?: Scope) {
         // if no functionScope is provided we are in the process of creating a new function scope, which for consistency links to itself
         this.functionScope = functionScope || this;
     }
@@ -200,7 +200,6 @@ class UsageWalker {
     public getUsage(sourceFile: ts.SourceFile) {
         this._scope = new Scope();
         const cb = (node: ts.Node): void => {
-            const savedScope = this._scope;
             const boundary = isScopeBoundary(node);
             if (boundary !== ScopeBoundary.None) {
                 if (boundary === ScopeBoundary.Function) {
@@ -209,13 +208,12 @@ class UsageWalker {
                         // named function expressions are only available inside the function, but declared variables shadow the name
                         // instead of merging
                         // therefore we need to add another scope layer only for the name of the function expression
-                        const scope = this._scope;
-                        const functionScope = this._scope = new Scope();
+                        this._scope = new Scope(this._scope);
                         this._scope.addVariable(node.name.text, node.name, false, false, DeclarationDomain.Value);
-                        this._scope = new Scope();
+                        this._scope = new Scope(this._scope);
                         ts.forEachChild(node, cb);
-                        this._onScopeEnd(functionScope);
-                        this._onScopeEnd(scope);
+                        this._onScopeEnd();
+                        this._onScopeEnd();
                         return;
                     }
                     if (isFunctionDeclaration(node) && node.body !== undefined) {
@@ -227,9 +225,9 @@ class UsageWalker {
                     } else if (isModuleDeclaration(node) && node.name.kind === ts.SyntaxKind.Identifier) {
                         this._handleNamespace(<ts.NamespaceDeclaration>node);
                     }
-                    this._scope = new Scope();
+                    this._scope = new Scope(this._scope);
                 } else {
-                    this._scope = new Scope(this._scope.functionScope);
+                    this._scope = new Scope(this._scope, this._scope.functionScope);
                 }
             }
             if (node.kind === ts.SyntaxKind.VariableDeclarationList) {
@@ -246,7 +244,7 @@ class UsageWalker {
                     // special handling for parameters
                     // each parameter initializer can only access preceding parameters, therefore we need to settle after each one
                     ts.forEachChild(node, cb);
-                    return this._settle(savedScope);
+                    return this._settle();
                 }
             } else if (isEnumMember(node)) {
                 this._scope.addVariable(getPropertyName(node.name)!, node.name, false, true, DeclarationDomain.Value);
@@ -262,14 +260,14 @@ class UsageWalker {
 
             if (boundary) {
                 ts.forEachChild(node, cb);
-                this._onScopeEnd(savedScope);
+                this._onScopeEnd();
             } else {
                 return ts.forEachChild(node, cb);
             }
         };
 
         ts.forEachChild(sourceFile, cb);
-        this._onScopeEnd(undefined, !ts.isExternalModule(sourceFile));
+        this._onScopeEnd(!ts.isExternalModule(sourceFile));
         return this._result;
     }
 
@@ -308,8 +306,8 @@ class UsageWalker {
             this._handleBindingName(declaration.name, blockScoped, exported);
     }
 
-    private _onScopeEnd(parent?: Scope, global?: boolean) {
-        const {variables, uses} = this._scope;
+    private _onScopeEnd(global?: boolean) {
+        const {variables, uses, parent} = this._scope;
         for (const use of uses) {
             const variable = variables.get(use.location.text);
             if (variable !== undefined && variable.domain & use.domain) {
@@ -327,8 +325,8 @@ class UsageWalker {
             this._scope = parent;
     }
 
-    private _settle(parent: Scope) {
-        const {variables, uses} = this._scope;
+    private _settle() {
+        const {variables, uses, parent} = this._scope;
         const newUses: VariableUse[] = [];
         for (const use of uses) {
             if ((use.domain & UsageDomain.Value) !== 0 && (use.domain & UsageDomain.TypeQuery) === 0) {
@@ -336,7 +334,7 @@ class UsageWalker {
                 if (variable !== undefined && variable.domain & use.domain) {
                     variable.uses.push(use);
                 } else {
-                    parent.uses.push(use);
+                    parent!.uses.push(use);
                 }
             } else {
                 newUses.push(use);
