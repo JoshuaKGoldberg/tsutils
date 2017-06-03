@@ -14,7 +14,8 @@ import {
     isImportEqualsDeclaration,
     isImportSpecifier,
     isNamespaceImport,
-} from '../typeguard';
+    isQualifiedName,
+} from '../typeguard/node';
 import {
     forEachDestructuringIdentifier,
     isParameterProperty,
@@ -37,14 +38,13 @@ import * as ts from 'typescript';
 class Scope {
     public functionScope: Scope;
     public variables = new Map<string, VariableInfo>();
-    public usedValues = new Map<string, ts.Identifier[]>();
-    public usedTypes = new Map<string, ts.Identifier[]>();
+    public uses: VariableUse[] = [];
     constructor(functionScope?: Scope) {
         // if no functionScope is provided we are in the process of creating a new function scope, which for consistency links to itself
         this.functionScope = functionScope || this;
     }
 
-    public addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, exported: boolean, domain: Domain) {
+    public addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, exported: boolean, domain: DeclarationDomain) {
         const scope = blockScoped ? this : this.functionScope;
         let variable = scope.variables.get(identifier);
         if (variable === undefined) {
@@ -61,55 +61,74 @@ class Scope {
         }
     }
 
-    public addUse(identifier: ts.Identifier, domain: Domain) {
-        addToList(identifier, (domain & Domain.Value) ? this.usedValues : this.usedTypes);
-    }
-}
-
-function addToList(identifier: ts.Identifier, map: Map<string, ts.Identifier[]>) {
-    const list = map.get(identifier.text);
-    if (list === undefined) {
-        map.set(identifier.text, [identifier]);
-    } else {
-        list.push(identifier);
-    }
-}
-
-function addToAllList(identifiers: ts.Identifier[], map: Map<string, ts.Identifier[]>) {
-    const name = identifiers[0].text;
-    const list = map.get(name);
-    if (list === undefined) {
-        map.set(name, [...identifiers]);
-    } else {
-        list.push(...identifiers);
+    public addUse(location: ts.Identifier, domain: UsageDomain) {
+        this.uses.push({location, domain});
     }
 }
 
 export interface VariableInfo {
-    domain: Domain;
+    domain: DeclarationDomain;
     declarations: ts.PropertyName[];
     exported: boolean;
     uses: VariableUse[];
+    inGlobalScope?: boolean;
 }
 
 export interface VariableUse {
-    domain: Domain;
+    domain: UsageDomain;
     location: ts.Identifier;
 }
 
-export const enum Domain {
-    Value = 1,
+export const enum DeclarationDomain {
+    Namespace = 1,
     Type = 2,
+    Value = 4,
+    Any = Namespace | Type | Value,
 }
 
-export function getUsageDomain(node: ts.Identifier): Domain | undefined {
+export const enum UsageDomain {
+    Namespace = 1,
+    Type = 2,
+    Value = 4,
+    ValueOrNamespace = 5,
+    TypeQuery = 8,
+}
+
+function getEntityNameParent(name: ts.EntityName) {
+    let parent = name.parent!;
+    while (parent.kind === ts.SyntaxKind.QualifiedName)
+        parent = parent.parent!;
+    return parent;
+}
+
+function isQualifiedNameStart(name: ts.QualifiedName, node: ts.Identifier): boolean {
+    if (name.right === node)
+        return false;
+    let parent = name.parent!;
+    while (isQualifiedName(parent)) {
+        if (parent.right === node)
+            return false;
+        name = parent;
+        parent = name.parent!;
+    }
+    return true;
+}
+
+export function getUsageDomain(node: ts.Identifier): UsageDomain | undefined {
     if (isUsedAsType(node))
-        return Domain.Type;
-    if (isValueUsage(node))
-        return Domain.Value;
+        return UsageDomain.Type;
+    if (node.parent!.kind === ts.SyntaxKind.TypeQuery)
+        return UsageDomain.Value | UsageDomain.TypeQuery;
+    if (isUsedAsValue(node))
+        return UsageDomain.ValueOrNamespace;
+    if (node.parent!.kind === ts.SyntaxKind.QualifiedName && isQualifiedNameStart(<ts.QualifiedName>node.parent, node))
+        return UsageDomain.Namespace |
+            (getEntityNameParent(<ts.QualifiedName>node.parent).kind === ts.SyntaxKind.TypeQuery ? UsageDomain.TypeQuery : 0);
+    if (node.parent!.kind === ts.SyntaxKind.NamespaceExportDeclaration)
+        return UsageDomain.Namespace;
 }
 
-export function isUsedAsType(node: ts.Identifier): boolean {
+function isUsedAsType(node: ts.Identifier): boolean {
     const parent = node.parent!;
     switch (parent.kind) {
         case ts.SyntaxKind.TypeReference:
@@ -118,18 +137,12 @@ export function isUsedAsType(node: ts.Identifier): boolean {
         case ts.SyntaxKind.ExpressionWithTypeArguments:
             return (<ts.HeritageClause>parent.parent).token === ts.SyntaxKind.ImplementsKeyword ||
                 parent.parent!.parent!.kind === ts.SyntaxKind.InterfaceDeclaration;
-        case ts.SyntaxKind.QualifiedName:
-            return (<ts.QualifiedName>parent).right !== node;
         default:
             return false;
     }
 }
 
-export function isUsedAsValue(node: ts.Identifier): boolean {
-    return !isUsedAsType(node) && isValueUsage(node);
-}
-
-function isValueUsage(node: ts.Identifier): boolean {
+function isUsedAsValue(node: ts.Identifier): boolean {
     const parent = node.parent!;
     switch (parent.kind) {
         case ts.SyntaxKind.BindingElement:
@@ -162,7 +175,6 @@ function isValueUsage(node: ts.Identifier): boolean {
         case ts.SyntaxKind.GetAccessor:
         case ts.SyntaxKind.SetAccessor:
         case ts.SyntaxKind.LabeledStatement:
-        case ts.SyntaxKind.NamespaceImport:
         case ts.SyntaxKind.ImportClause:
         case ts.SyntaxKind.ImportSpecifier:
         case ts.SyntaxKind.TypePredicate:
@@ -170,6 +182,8 @@ function isValueUsage(node: ts.Identifier): boolean {
         case ts.SyntaxKind.PropertySignature:
         case ts.SyntaxKind.NamespaceExportDeclaration:
         case ts.SyntaxKind.QualifiedName:
+        case ts.SyntaxKind.TypeReference:
+        case ts.SyntaxKind.TypeOperator:
             return false;
         default:
             return true;
@@ -197,7 +211,7 @@ class UsageWalker {
                         // therefore we need to add another scope layer only for the name of the function expression
                         const scope = this._scope;
                         const functionScope = this._scope = new Scope();
-                        this._scope.addVariable(node.name.text, node.name, false, false, Domain.Value);
+                        this._scope.addVariable(node.name.text, node.name, false, false, DeclarationDomain.Value);
                         this._scope = new Scope();
                         ts.forEachChild(node, cb);
                         this._onScopeEnd(functionScope);
@@ -205,11 +219,11 @@ class UsageWalker {
                         return;
                     }
                     if (isFunctionDeclaration(node) && node.body !== undefined) {
-                        this._handleDeclaration(node, false, Domain.Value);
+                        this._handleDeclaration(node, false, DeclarationDomain.Value);
                     } else if (isEnumDeclaration(node)) {
-                        this._handleDeclaration(node, true, Domain.Type | Domain.Type);
+                        this._handleDeclaration(node, true, DeclarationDomain.Any);
                     } else if (isClassLikeDeclaration(node)) {
-                        this._handleDeclaration(node, true, Domain.Value & Domain.Type);
+                        this._handleDeclaration(node, true, DeclarationDomain.Value | DeclarationDomain.Type);
                     } else if (isModuleDeclaration(node) && node.name.kind === ts.SyntaxKind.Identifier) {
                         this._handleNamespace(<ts.NamespaceDeclaration>node);
                     }
@@ -235,11 +249,11 @@ class UsageWalker {
                     return this._settle(savedScope);
                 }
             } else if (isEnumMember(node)) {
-                this._scope.addVariable(getPropertyName(node.name)!, node.name, false, true, Domain.Value);
+                this._scope.addVariable(getPropertyName(node.name)!, node.name, false, true, DeclarationDomain.Value);
             } else if (isImportClause(node) || isImportSpecifier(node) || isNamespaceImport(node) || isImportEqualsDeclaration(node)) {
-                this._handleDeclaration(node, false, Domain.Type | Domain.Value);
+                this._handleDeclaration(node, false, DeclarationDomain.Any);
             } else if (isInterfaceDeclaration(node) || isTypeAliasDeclaration(node) || isTypeParameterDeclaration(node)) {
-                this._handleDeclaration(node, true, Domain.Type);
+                this._handleDeclaration(node, true, DeclarationDomain.Type);
             } else if (isIdentifier(node)) {
                 const domain = getUsageDomain(node);
                 if (domain !== undefined)
@@ -255,8 +269,7 @@ class UsageWalker {
         };
 
         ts.forEachChild(sourceFile, cb);
-        if (ts.isExternalModule(sourceFile))
-            this._onScopeEnd();
+        this._onScopeEnd(undefined, !ts.isExternalModule(sourceFile));
         return this._result;
     }
 
@@ -266,10 +279,10 @@ class UsageWalker {
             node.name,
             false,
             node.parent!.kind === ts.SyntaxKind.ModuleDeclaration || hasModifier(node.modifiers, ts.SyntaxKind.ExportKeyword),
-            Domain.Value);
+            DeclarationDomain.Namespace);
     }
 
-    private _handleDeclaration(node: ts.NamedDeclaration, blockScoped: boolean, domain: Domain ) {
+    private _handleDeclaration(node: ts.NamedDeclaration, blockScoped: boolean, domain: DeclarationDomain ) {
         if (node.name !== undefined)
             this._scope.addVariable((<ts.Identifier>node.name).text, <ts.Identifier>node.name, blockScoped,
                                     hasModifier(node.modifiers, ts.SyntaxKind.ExportKeyword), domain);
@@ -279,10 +292,10 @@ class UsageWalker {
                                blockScoped: boolean,
                                exported: boolean) {
         if (name.kind === ts.SyntaxKind.Identifier) {
-            this._scope.addVariable(name.text, name, blockScoped, exported, Domain.Value);
+            this._scope.addVariable(name.text, name, blockScoped, exported, DeclarationDomain.Value);
         } else {
             forEachDestructuringIdentifier(name, (declaration) => {
-                this._scope.addVariable(declaration.name.text, declaration.name, blockScoped, exported, Domain.Value);
+                this._scope.addVariable(declaration.name.text, declaration.name, blockScoped, exported, DeclarationDomain.Value);
             });
         }
     }
@@ -295,43 +308,40 @@ class UsageWalker {
             this._handleBindingName(declaration.name, blockScoped, exported);
     }
 
-    private _onScopeEnd(parent?: Scope) {
-        this._settle(parent);
-        const {variables, usedTypes} = this._scope;
-        usedTypes.forEach((uses, name) => {
-            const variable = variables.get(name);
-            if (variable !== undefined && variable.domain & Domain.Type) {
-                for (const use of uses)
-                    variable.uses.push( {
-                        domain: Domain.Type,
-                        location: use,
-                    });
-            } else if (parent !== undefined && uses.length !== 0) {
-                addToAllList(uses, parent.usedTypes);
+    private _onScopeEnd(parent?: Scope, global?: boolean) {
+        const {variables, uses} = this._scope;
+        for (const use of uses) {
+            const variable = variables.get(use.location.text);
+            if (variable !== undefined && variable.domain & use.domain) {
+                variable.uses.push(use);
+            } else if (parent !== undefined) {
+                parent.uses.push(use);
             }
-        });
-        variables.forEach((value) => {
-            for (const declaration of value.declarations)
-                this._result.set(declaration, value);
+        }
+        variables.forEach((variable) => {
+            variable.inGlobalScope = global;
+            for (const declaration of variable.declarations)
+                this._result.set(declaration, variable);
         });
         if (parent !== undefined)
             this._scope = parent;
     }
 
-    private _settle(parent?: Scope) {
-        const {variables, usedValues} = this._scope;
-        usedValues.forEach((uses, name) => {
-            const variable = variables.get(name);
-            if (variable !== undefined && variable.domain & Domain.Value) {
-                for (const use of uses)
-                    variable.uses.push( {
-                        domain: Domain.Value,
-                        location: use,
-                    });
-            } else if (parent !== undefined && uses.length !== 0) {
-                addToAllList(uses, parent.usedValues);
+    private _settle(parent: Scope) {
+        const {variables, uses} = this._scope;
+        const newUses: VariableUse[] = [];
+        for (const use of uses) {
+            if ((use.domain & UsageDomain.Value) !== 0 && (use.domain & UsageDomain.TypeQuery) === 0) {
+                const variable = variables.get(use.location.text);
+                if (variable !== undefined && variable.domain & use.domain) {
+                    variable.uses.push(use);
+                } else {
+                    parent.uses.push(use);
+                }
+            } else {
+                newUses.push(use);
             }
-        });
-        usedValues.clear();
+        }
+        this._scope.uses = newUses;
     }
 }

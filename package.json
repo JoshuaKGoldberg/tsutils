@@ -4,7 +4,7 @@
   "description": "utilities for working with typescript's AST",
   "scripts": {
     "compile": "rm -rf {,util,typeguard,src,test}/*.js; tsc -p .",
-    "lint": "tslint -p ./tsconfig.json",
+    "lint": "tslint -p . -e 'test/rules/*/*Rule.ts'",
     "lint:fix": "tslint --fix -p ./tsconfig.json",
     "test": "mocha test/*Tests.js; tslint --test test/rules/*/tslint.json",
     "verify": "npm run compile && npm run lint && npm run coverage",
