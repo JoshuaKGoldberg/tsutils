@@ -26,3 +26,32 @@ interface four {}
 namespace four {}
 let varFour: four;
     ~~~~~~~ [Unused]
+
+function foo1() {}
+         ~~~~ [Unused]
+function foo2() {}
+         ~~~~ [Unused]
+function foo3() {}
+namespace extended {
+          ~~~~~~~~ [Unused]
+    function foo1() {}
+    export function foo2() {}
+    export namespace nested {
+        foo1();
+        foo2();
+        export function foo3() {}
+    }
+    foo1();
+    foo2();
+}
+namespace extended.nested {
+          ~~~~~~~~ [Unused]
+    foo2();
+}
+namespace extended {
+          ~~~~~~~~ [Unused]
+    namespace nested {
+              ~~~~~~ [Unused]
+        foo3();
+    }
+}
