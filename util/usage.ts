@@ -49,7 +49,7 @@ abstract class AbstractScope implements Scope {
     protected _uses: VariableUse[] = [];
     protected _namespaceScopes = new Map<string, NamespaceScope>();
 
-    constructor(private _global: boolean, protected _addUseToParent: (use: VariableUse) => void) {}
+    constructor(private _global: boolean) {}
 
     public addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, exported: boolean, domain: DeclarationDomain) {
         const variables = this._getScope(blockScoped).getVariables();
@@ -122,33 +122,31 @@ abstract class AbstractScope implements Scope {
     protected _getScope(_blockScoped: boolean): Scope {
         return this;
     }
+
+    protected _addUseToParent(_use: VariableUse) {} // tslint:disable-line:prefer-function-over-method
 }
 
 class RootScope extends AbstractScope {
-    constructor(global: boolean) {
-        super(global, () => {});
-    }
-
     public getParent(): never { // tslint:disable-line:prefer-function-over-method
         throw new Error('not supported');
     }
 }
 
-class NonRootScope extends AbstractScope {
-    constructor(protected _parent: Scope, addUse = (use: VariableUse) => _parent.addUse(use)) {
-        super(false, addUse);
+class NonRootScope<T extends Scope = Scope> extends AbstractScope {
+    constructor(protected _parent: T) {
+        super(false);
     }
 
     public getParent() {
         return this._parent;
     }
+
+    protected _addUseToParent(use: VariableUse) {
+        return this._parent.addUse(use);
+    }
 }
 
-class FunctionScope extends NonRootScope {
-    constructor(parent: Scope, addUseToParent?: (use: VariableUse) => void) {
-        super(parent, addUseToParent);
-    }
-
+class FunctionScope<T extends Scope = Scope> extends NonRootScope<T> {
     public settle() {
         const newUses: VariableUse[] = [];
         for (const use of this._uses) {
@@ -167,14 +165,14 @@ class FunctionScope extends NonRootScope {
     }
 }
 
+class FunctionExpressionInnerScope extends FunctionScope<FunctionExpressionScope> {
+    protected _addUseToParent(use: VariableUse) {
+        return this._parent.addUseToParent(use);
+    }
+}
+
 class FunctionExpressionScope extends NonRootScope {
-    private _innerScope = new FunctionScope(this, (use) => {
-        if (use.domain & UsageDomain.Value && use.location.text === this._name.text) {
-            this._nameUses.push(use);
-        } else {
-            this._parent.addUse(use);
-        }
-    });
+    private _innerScope = new FunctionExpressionInnerScope(this);
     private _nameUses: VariableUse[];
 
     constructor(private _name: ts.Identifier, parent: Scope) {
@@ -194,6 +192,14 @@ class FunctionExpressionScope extends NonRootScope {
 
     public settle() {
         return this._innerScope.settle();
+    }
+
+    public addUseToParent(use: VariableUse) {
+        if (use.domain & UsageDomain.Value && use.location.text === this._name.text) {
+            this._nameUses.push(use);
+        } else {
+            return this._parent.addUse(use);
+        }
     }
 
     protected _getScope() {
