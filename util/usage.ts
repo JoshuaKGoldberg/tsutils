@@ -30,31 +30,37 @@ import * as ts from 'typescript';
 
 // TODO handle open ended namespaces and enums
 // TODO special handling of anything exported from namespace?
-// TODO handle use before delcare in typeof for parameters:
-// function fn(foo: typeof bar, bar: typeof baz, baz: typeof bas) {
-//     let bas: boolean;
-// }
 
-class Scope {
-    public functionScope: Scope;
-    public variables = new Map<string, VariableInfo>();
-    public uses: VariableUse[] = [];
-    constructor(public parent?: Scope, functionScope?: Scope) {
-        // if no functionScope is provided we are in the process of creating a new function scope, which for consistency links to itself
-        this.functionScope = functionScope || this;
-    }
+type VariableCallback = (variable: VariableInfo) => void;
+
+interface Scope {
+    addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, exported: boolean, domain: DeclarationDomain): void;
+    addUse(location: ts.Identifier, domain: UsageDomain): void;
+    getVariables(): Map<string, VariableInfo>;
+    getParent(): Scope;
+    getFunctionScope(): Scope;
+    end(cb: VariableCallback): void;
+    settle(): void;
+}
+
+abstract class AbstractScope implements Scope {
+    protected _variables = new Map<string, VariableInfo>();
+    protected _uses: VariableUse[] = [];
+
+    constructor(private _global: boolean) {}
 
     public addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, exported: boolean, domain: DeclarationDomain) {
-        const scope = blockScoped ? this : this.functionScope;
-        let variable = scope.variables.get(identifier);
+        const variables = this._getScope(blockScoped).getVariables();
+        let variable = variables.get(identifier);
         if (variable === undefined) {
             variable = {
                 domain,
                 exported,
                 declarations: [name],
                 uses: [],
+                inGlobalScope: this._global,
             };
-            scope.variables.set(identifier, variable);
+            variables.set(identifier, variable);
         } else {
             variable.domain |= domain;
             variable.declarations.push(name);
@@ -62,7 +68,132 @@ class Scope {
     }
 
     public addUse(location: ts.Identifier, domain: UsageDomain) {
-        this.uses.push({location, domain});
+        this._uses.push({location, domain});
+    }
+
+    public getVariables() {
+        return this._variables;
+    }
+
+    public abstract getParent(): Scope;
+
+    public getFunctionScope(): Scope {
+        return this;
+    }
+
+    public end(cb: VariableCallback) {
+        for (const use of this._uses) {
+            const variable = this._variables.get(use.location.text);
+            if (variable !== undefined && variable.domain & use.domain) {
+                variable.uses.push(use);
+            } else {
+                this._addToParent(use);
+            }
+        }
+        this._variables.forEach(cb);
+    }
+
+    public settle() { // tslint:disable-line:prefer-function-over-method
+        throw new Error('not supported');
+    }
+
+    protected _getScope(_blockScoped: boolean): Scope {
+        return this;
+    }
+
+    protected _addToParent(_use: VariableUse) {} // tslint:disable-line:prefer-function-over-method
+}
+
+class RootScope extends AbstractScope {
+    public getParent(): never { // tslint:disable-line:prefer-function-over-method
+        throw new Error('not supported');
+    }
+}
+
+class NonRootScope extends AbstractScope {
+    constructor(protected _parent: Scope) {
+        super(false);
+    }
+
+    public getParent() {
+        return this._parent;
+    }
+
+    protected _addToParent({location, domain}: VariableUse) {
+        this._parent.addUse(location, domain);
+    }
+}
+
+class FunctionScope extends NonRootScope {
+    constructor(parent: Scope) {
+        super(parent);
+    }
+
+    public settle() {
+        const newUses: VariableUse[] = [];
+        for (const use of this._uses) {
+            if ((use.domain & UsageDomain.Value) !== 0 && (use.domain & UsageDomain.TypeQuery) === 0) {
+                const variable = this._variables.get(use.location.text);
+                if (variable !== undefined && variable.domain & use.domain) {
+                    variable.uses.push(use);
+                } else {
+                    this._addToParent(use);
+                }
+            } else {
+                newUses.push(use);
+            }
+        }
+        this._uses = newUses;
+    }
+}
+
+class FunctionExpressionScope extends NonRootScope {
+    private _innerScope = new FunctionScope(this);
+    private _nameUses: VariableUse[];
+
+    constructor(private _name: ts.Identifier, parent: Scope) {
+        super(parent);
+    }
+
+    public end(cb: VariableCallback) {
+        this._innerScope.end(cb);
+        cb({
+            declarations: [this._name],
+            domain: DeclarationDomain.Value,
+            exported: false,
+            uses: this._nameUses,
+            inGlobalScope: false,
+        });
+    }
+
+    public settle() {
+        return this._innerScope.settle();
+    }
+
+    protected _addToParent(use: VariableUse) {
+        if (use.domain & UsageDomain.Value && use.location.text === this._name.text) {
+            this._nameUses.push(use);
+        } else {
+            this._parent.addUse(use.location, use.domain);
+        }
+    }
+
+    protected _getScope() {
+        return this._innerScope;
+    }
+}
+
+class BlockScope extends NonRootScope {
+    constructor(private _functionScope: Scope, parent: Scope) {
+        super(parent);
+    }
+
+    public getFunctionScope() {
+        return this._functionScope;
+    }
+
+    protected _getScope(blockScoped: boolean) {
+        return blockScoped ? this : this._functionScope;
     }
 }
 
@@ -71,7 +202,7 @@ export interface VariableInfo {
     declarations: ts.PropertyName[];
     exported: boolean;
     uses: VariableUse[];
-    inGlobalScope?: boolean;
+    inGlobalScope: boolean;
 }
 
 export interface VariableUse {
@@ -198,38 +329,33 @@ class UsageWalker {
     private _result = new Map<ts.PropertyName, VariableInfo>();
     private _scope: Scope;
     public getUsage(sourceFile: ts.SourceFile) {
-        this._scope = new Scope();
+        const variableCallback = (variable: VariableInfo) => {
+            for (const declaration of variable.declarations)
+                this._result.set(declaration, variable);
+        };
+        this._scope = new RootScope(!ts.isExternalModule(sourceFile));
         const cb = (node: ts.Node): void => {
             const boundary = isScopeBoundary(node);
             if (boundary !== ScopeBoundary.None) {
                 if (boundary === ScopeBoundary.Function) {
                     if (isFunctionExpression(node) && node.name !== undefined) {
-                        // special handling for function expression
-                        // named function expressions are only available inside the function, but declared variables shadow the name
-                        // instead of merging
-                        // therefore we need to add another scope layer only for the name of the function expression
-                        this._scope = new Scope(this._scope);
-                        this._scope.addVariable(node.name.text, node.name, false, false, DeclarationDomain.Value);
-                        this._scope = new Scope(this._scope);
-                        ts.forEachChild(node, cb);
-                        this._onScopeEnd();
-                        this._onScopeEnd();
-                        return;
+                        this._scope = new FunctionExpressionScope(node.name, this._scope);
+                    } else {
+                        if (isFunctionDeclaration(node) && node.body !== undefined) {
+                            this._handleDeclaration(node, false, DeclarationDomain.Value);
+                        } else if (isEnumDeclaration(node)) {
+                            this._handleDeclaration(node, true, DeclarationDomain.Any);
+                        } else if (isClassLikeDeclaration(node)) {
+                            this._handleDeclaration(node, true, DeclarationDomain.Value | DeclarationDomain.Type);
+                        } else if (isModuleDeclaration(node) && node.name.kind === ts.SyntaxKind.Identifier) {
+                            this._handleNamespace(<ts.NamespaceDeclaration>node);
+                        }
+                        this._scope = new FunctionScope(this._scope);
                     }
-                    if (isFunctionDeclaration(node) && node.body !== undefined) {
-                        this._handleDeclaration(node, false, DeclarationDomain.Value);
-                    } else if (isEnumDeclaration(node)) {
-                        this._handleDeclaration(node, true, DeclarationDomain.Any);
-                    } else if (isClassLikeDeclaration(node)) {
-                        this._handleDeclaration(node, true, DeclarationDomain.Value | DeclarationDomain.Type);
-                    } else if (isModuleDeclaration(node) && node.name.kind === ts.SyntaxKind.Identifier) {
-                        this._handleNamespace(<ts.NamespaceDeclaration>node);
-                    }
-                    this._scope = new Scope(this._scope);
                 } else {
-                    this._scope = new Scope(this._scope, this._scope.functionScope);
+                    this._scope = new BlockScope(this._scope.getFunctionScope(), this._scope);
                 }
-            }
+            } // TODO make this an else-if
             if (node.kind === ts.SyntaxKind.VariableDeclarationList) {
                 this._handleVariableDeclaration(<ts.VariableDeclarationList>node);
             } else if (node.kind === ts.SyntaxKind.CatchClause) {
@@ -244,7 +370,7 @@ class UsageWalker {
                     // special handling for parameters
                     // each parameter initializer can only access preceding parameters, therefore we need to settle after each one
                     ts.forEachChild(node, cb);
-                    return this._settle();
+                    return this._scope.settle();
                 }
             } else if (isEnumMember(node)) {
                 this._scope.addVariable(getPropertyName(node.name)!, node.name, false, true, DeclarationDomain.Value);
@@ -256,18 +382,20 @@ class UsageWalker {
                 const domain = getUsageDomain(node);
                 if (domain !== undefined)
                     this._scope.addUse(node, domain);
+                return;
             }
 
             if (boundary) {
                 ts.forEachChild(node, cb);
-                this._onScopeEnd();
+                this._scope.end(variableCallback);
+                this._scope = this._scope.getParent();
             } else {
                 return ts.forEachChild(node, cb);
             }
         };
 
         ts.forEachChild(sourceFile, cb);
-        this._onScopeEnd(!ts.isExternalModule(sourceFile));
+        this._scope.end(variableCallback);
         return this._result;
     }
 
@@ -304,42 +432,5 @@ class UsageWalker {
             hasModifier(declarationList.parent!.modifiers, ts.SyntaxKind.ExportKeyword);
         for (const declaration of declarationList.declarations)
             this._handleBindingName(declaration.name, blockScoped, exported);
-    }
-
-    private _onScopeEnd(global?: boolean) {
-        const {variables, uses, parent} = this._scope;
-        for (const use of uses) {
-            const variable = variables.get(use.location.text);
-            if (variable !== undefined && variable.domain & use.domain) {
-                variable.uses.push(use);
-            } else if (parent !== undefined) {
-                parent.uses.push(use);
-            }
-        }
-        variables.forEach((variable) => {
-            variable.inGlobalScope = global;
-            for (const declaration of variable.declarations)
-                this._result.set(declaration, variable);
-        });
-        if (parent !== undefined)
-            this._scope = parent;
-    }
-
-    private _settle() {
-        const {variables, uses, parent} = this._scope;
-        const newUses: VariableUse[] = [];
-        for (const use of uses) {
-            if ((use.domain & UsageDomain.Value) !== 0 && (use.domain & UsageDomain.TypeQuery) === 0) {
-                const variable = variables.get(use.location.text);
-                if (variable !== undefined && variable.domain & use.domain) {
-                    variable.uses.push(use);
-                } else {
-                    parent!.uses.push(use);
-                }
-            } else {
-                newUses.push(use);
-            }
-        }
-        this._scope.uses = newUses;
     }
 }
