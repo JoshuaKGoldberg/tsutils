@@ -1,0 +1,28 @@
+export {};
+namespace one {}
+class one {}
+let varOne: typeof one;
+    ~~~~~~ [Unused]
+
+class two {}
+namespace ns {
+          ~~ [Unused]
+    namespace two {}
+              ~~~ [Unused]
+    let varTwo: typeof two{}
+        ~~~~~~ [Unused]
+}
+
+interface three {}
+namespace ns {
+          ~~ [Unused]
+    namespace three {}
+              ~~~~~ [Unused]
+    let varThree: three;
+        ~~~~~~~~ [Unused]
+}
+
+interface four {}
+namespace four {}
+let varFour: four;
+    ~~~~~~~ [Unused]
