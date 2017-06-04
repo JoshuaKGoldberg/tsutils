@@ -36,7 +36,6 @@ interface Scope {
     addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, exported: boolean, domain: DeclarationDomain): void;
     addUse(use: VariableUse): void;
     getVariables(): Map<string, VariableInfo>;
-    getParent(): Scope;
     getFunctionScope(): Scope;
     end(cb: VariableCallback): void;
     settle(): void;
@@ -77,8 +76,6 @@ abstract class AbstractScope implements Scope {
         return this._variables;
     }
 
-    public abstract getParent(): Scope;
-
     public getFunctionScope(): Scope {
         return this;
     }
@@ -111,6 +108,8 @@ abstract class AbstractScope implements Scope {
         if (scope === undefined) {
             scope = new NamespaceScope(this);
             this._namespaceScopes.set(name, scope);
+        } else {
+            scope.refresh(this);
         }
         return scope;
     }
@@ -126,19 +125,11 @@ abstract class AbstractScope implements Scope {
     protected _addUseToParent(_use: VariableUse) {} // tslint:disable-line:prefer-function-over-method
 }
 
-class RootScope extends AbstractScope {
-    public getParent(): never { // tslint:disable-line:prefer-function-over-method
-        throw new Error('not supported');
-    }
-}
+class RootScope extends AbstractScope {}
 
 class NonRootScope<T extends Scope = Scope> extends AbstractScope {
     constructor(protected _parent: T) {
         super(false);
-    }
-
-    public getParent() {
-        return this._parent;
     }
 
     protected _addUseToParent(use: VariableUse) {
@@ -249,8 +240,9 @@ class NamespaceScope extends NonRootScope {
         return super.createOrReuseNamespaceScope(name, exported);
     }
 
-    public cleanup() {
+    public refresh(newParent: Scope) {
         this._innerScope = new NonRootScope(this);
+        this._parent = newParent;
     }
 
     protected _getScope() {
@@ -400,7 +392,8 @@ class UsageWalker {
         this._scope = new RootScope(!ts.isExternalModule(sourceFile));
         const cb = (node: ts.Node): void => {
             const boundary = isScopeBoundary(node);
-            if (boundary !== ScopeBoundary.None) {
+            if (boundary) {
+                const savedScope = this._scope;
                 if (boundary === ScopeBoundary.Function) {
                     if (isFunctionExpression(node) && node.name !== undefined) {
                         this._scope = new FunctionExpressionScope(node.name, this._scope);
@@ -427,7 +420,12 @@ class UsageWalker {
                         this._handleBindingName((<ts.CatchClause>node).variableDeclaration.name, true, true);
                     this._scope = new BlockScope(this._scope.getFunctionScope(), this._scope);
                 }
-            } else if (node.kind === ts.SyntaxKind.VariableDeclarationList) {
+                ts.forEachChild(node, cb);
+                this._scope.end(variableCallback);
+                this._scope = savedScope;
+                return;
+            }
+            if (node.kind === ts.SyntaxKind.VariableDeclarationList) {
                 this._handleVariableDeclaration(<ts.VariableDeclarationList>node);
             } else if (isParameterDeclaration(node)) {
                 const parent = node.parent!;
@@ -462,13 +460,7 @@ class UsageWalker {
                 return;
             }
 
-            if (boundary) {
-                ts.forEachChild(node, cb);
-                this._scope.end(variableCallback);
-                this._scope = this._scope.getParent();
-            } else {
-                return ts.forEachChild(node, cb);
-            }
+            return ts.forEachChild(node, cb);
         };
 
         ts.forEachChild(sourceFile, cb);
