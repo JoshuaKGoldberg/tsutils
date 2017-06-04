@@ -51,7 +51,7 @@ abstract class AbstractScope implements Scope {
     constructor(private _global: boolean) {}
 
     public addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, exported: boolean, domain: DeclarationDomain) {
-        const variables = this._getScope(blockScoped).getVariables();
+        const variables = this._getDestinationScope(blockScoped).getVariables();
         let variable = variables.get(identifier);
         if (variable === undefined) {
             variable = {
@@ -89,7 +89,7 @@ abstract class AbstractScope implements Scope {
                 this._addUseToParent(use);
             }
         }
-        this._variables.forEach(cb);
+        return this._variables.forEach(cb);
     }
 
     public settle() { // tslint:disable-line:prefer-function-over-method
@@ -118,7 +118,7 @@ abstract class AbstractScope implements Scope {
         return this._namespaceScopes.get(name);
     }
 
-    protected _getScope(_blockScoped: boolean): Scope {
+    protected _getDestinationScope(_blockScoped: boolean): Scope {
         return this;
     }
 
@@ -172,13 +172,16 @@ class FunctionExpressionScope extends NonRootScope {
 
     public end(cb: VariableCallback) {
         this._innerScope.end(cb);
-        cb({
-            declarations: [this._name],
-            domain: DeclarationDomain.Value,
-            exported: false,
-            uses: this._nameUses,
-            inGlobalScope: false,
-        }, this._name.text);
+        return cb(
+            {
+                declarations: [this._name],
+                domain: DeclarationDomain.Value,
+                exported: false,
+                uses: this._nameUses,
+                inGlobalScope: false,
+            },
+            this._name.text,
+        );
     }
 
     public settle() {
@@ -193,7 +196,11 @@ class FunctionExpressionScope extends NonRootScope {
         }
     }
 
-    protected _getScope() {
+    public addUse(use: VariableUse) {
+        return this._innerScope.addUse(use);
+    }
+
+    protected _getDestinationScope() {
         return this._innerScope;
     }
 }
@@ -207,13 +214,19 @@ class BlockScope extends NonRootScope {
         return this._functionScope;
     }
 
-    protected _getScope(blockScoped: boolean) {
+    protected _getDestinationScope(blockScoped: boolean) {
         return blockScoped ? this : this._functionScope;
     }
 }
 
+class NamespaceInnerScope extends NonRootScope<NamespaceScope> {
+    protected _addUseToParent(use: VariableUse) {
+        this._parent.addUseFromInner(use);
+    }
+}
+
 class NamespaceScope extends NonRootScope {
-    private _innerScope = new NonRootScope(this);
+    private _innerScope = new NamespaceInnerScope(this);
 
     public end(cb: VariableCallback) {
         this._innerScope.end((variable, key) => {
@@ -231,7 +244,7 @@ class NamespaceScope extends NonRootScope {
             if (variable.domain & DeclarationDomain.Namespace && this._namespaceScopes.get(key) === undefined)
                 this._namespaceScopes.set(key, this._innerScope.getNamespaceScope(key)!);
         });
-        super.end(cb);
+        return super.end(cb);
     }
 
     public createOrReuseNamespaceScope(name: string, exported: boolean): NamespaceScope {
@@ -241,11 +254,20 @@ class NamespaceScope extends NonRootScope {
     }
 
     public refresh(newParent: Scope) {
-        this._innerScope = new NonRootScope(this);
+        this._innerScope = new NamespaceInnerScope(this);
         this._parent = newParent;
+        this._uses.length = 0;
     }
 
-    protected _getScope() {
+    public addUse(use: VariableUse) {
+        return this._innerScope.addUse(use);
+    }
+
+    public addUseFromInner(use: VariableUse) {
+        this._uses.push(use);
+    }
+
+    protected _getDestinationScope() {
         return this._innerScope;
     }
 }
