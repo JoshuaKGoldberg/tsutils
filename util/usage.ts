@@ -421,6 +421,7 @@ class UsageWalker {
                         this._scope = new FunctionExpressionScope(node.name, this._scope);
                     } else if (isModuleDeclaration(node) && node.name.kind === ts.SyntaxKind.Identifier) {
                         this._handleNamespace(<ts.NamespaceDeclaration>node);
+                        // TODO also do this for ambient modules
                         this._scope = this._scope.createOrReuseNamespaceScope(node.name.text,
                                                                               isNamespaceExported(<ts.NamespaceDeclaration>node));
                     } else if (isEnumDeclaration(node)) {

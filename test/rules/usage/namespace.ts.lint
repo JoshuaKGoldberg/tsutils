@@ -55,3 +55,30 @@ namespace extended {
         foo3();
     }
 }
+
+namespace T {
+    class T {
+          ~ [Unused]
+        static readonly V = class {}
+    }
+    export type V = any;
+
+    export let foo: T.V;
+}
+
+namespace T2 {
+    class T2 {
+          ~~ [Unused]
+        static readonly V = class {}
+    }
+    export let V;
+
+    export let foo: typeof T2.V;
+}
+
+let nested;
+    ~~~~~~ [Unused]
+namespace T3.nested {
+    export let T;
+    export let foo: T3.nested.T;
+}
