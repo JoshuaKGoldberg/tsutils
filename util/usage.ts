@@ -35,7 +35,7 @@ type VariableCallback = (variable: VariableInfo) => void;
 
 interface Scope {
     addVariable(identifier: string, name: ts.PropertyName, blockScoped: boolean, exported: boolean, domain: DeclarationDomain): void;
-    addUse(location: ts.Identifier, domain: UsageDomain): void;
+    addUse(use: VariableUse): void;
     getVariables(): Map<string, VariableInfo>;
     getParent(): Scope;
     getFunctionScope(): Scope;
@@ -67,8 +67,8 @@ abstract class AbstractScope implements Scope {
         }
     }
 
-    public addUse(location: ts.Identifier, domain: UsageDomain) {
-        this._uses.push({location, domain});
+    public addUse(use: VariableUse) {
+        this._uses.push(use);
     }
 
     public getVariables() {
@@ -119,8 +119,8 @@ class NonRootScope extends AbstractScope {
         return this._parent;
     }
 
-    protected _addToParent({location, domain}: VariableUse) {
-        this._parent.addUse(location, domain);
+    protected _addToParent(use: VariableUse) {
+        this._parent.addUse(use);
     }
 }
 
@@ -174,7 +174,7 @@ class FunctionExpressionScope extends NonRootScope {
         if (use.domain & UsageDomain.Value && use.location.text === this._name.text) {
             this._nameUses.push(use);
         } else {
-            this._parent.addUse(use.location, use.domain);
+            this._parent.addUse(use);
         }
     }
 
@@ -381,7 +381,7 @@ class UsageWalker {
             } else if (isIdentifier(node)) {
                 const domain = getUsageDomain(node);
                 if (domain !== undefined)
-                    this._scope.addUse(node, domain);
+                    this._scope.addUse({domain, location: node});
                 return;
             }
 
