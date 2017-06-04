@@ -14,7 +14,6 @@ import {
     isImportEqualsDeclaration,
     isImportSpecifier,
     isNamespaceImport,
-    isQualifiedName,
     isExportSpecifier,
     isExportAssignment,
 } from '../typeguard/node';
@@ -308,19 +307,6 @@ function getEntityNameParent(name: ts.EntityName) {
     return parent;
 }
 
-function isQualifiedNameStart(name: ts.QualifiedName, node: ts.Identifier): boolean {
-    if (name.right === node)
-        return false;
-    let parent = name.parent!;
-    while (isQualifiedName(parent)) {
-        if (parent.right === node)
-            return false;
-        name = parent;
-        parent = name.parent!;
-    }
-    return true;
-}
-
 export function getUsageDomain(node: ts.Identifier): UsageDomain | undefined {
     if (isUsedAsType(node))
         return UsageDomain.Type;
@@ -328,7 +314,7 @@ export function getUsageDomain(node: ts.Identifier): UsageDomain | undefined {
         return UsageDomain.Value | UsageDomain.TypeQuery;
     if (isUsedAsValue(node))
         return UsageDomain.ValueOrNamespace;
-    if (node.parent!.kind === ts.SyntaxKind.QualifiedName && isQualifiedNameStart(<ts.QualifiedName>node.parent, node))
+    if (node.parent!.kind === ts.SyntaxKind.QualifiedName && (<ts.QualifiedName>node.parent).left === node)
         return UsageDomain.Namespace |
             (getEntityNameParent(<ts.QualifiedName>node.parent).kind === ts.SyntaxKind.TypeQuery ? UsageDomain.TypeQuery : 0);
     if (node.parent!.kind === ts.SyntaxKind.NamespaceExportDeclaration)
