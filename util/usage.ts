@@ -40,12 +40,14 @@ interface Scope {
     settle(): void;
     markExported(name: ts.Identifier): void;
     createOrReuseNamespaceScope(name: string, exported: boolean): NamespaceScope;
+    createOrReuseEnumScope(name: string, exported: boolean): EnumScope;
 }
 
 abstract class AbstractScope implements Scope {
     protected _variables = new Map<string, VariableInfo>();
     protected _uses: VariableUse[] = [];
-    protected _namespaceScopes = new Map<string, NamespaceScope>();
+    protected _namespaceScopes: Map<string, NamespaceScope> | undefined = undefined;
+    private _enumScopes: Map<string, EnumScope> | undefined = undefined;
 
     constructor(private _global: boolean) {}
 
@@ -103,7 +105,12 @@ abstract class AbstractScope implements Scope {
     }
 
     public createOrReuseNamespaceScope(name: string, _exported: boolean): NamespaceScope {
-        let scope = this._namespaceScopes.get(name);
+        let scope: NamespaceScope | undefined;
+        if (this._namespaceScopes === undefined) {
+            this._namespaceScopes = new Map();
+        } else {
+            scope = this._namespaceScopes.get(name);
+        }
         if (scope === undefined) {
             scope = new NamespaceScope(this);
             this._namespaceScopes.set(name, scope);
@@ -113,8 +120,20 @@ abstract class AbstractScope implements Scope {
         return scope;
     }
 
-    public getNamespaceScope(name: string) {
-        return this._namespaceScopes.get(name);
+    public createOrReuseEnumScope(name: string, _exported: boolean): EnumScope {
+        let scope: EnumScope | undefined;
+        if (this._enumScopes === undefined) {
+            this._enumScopes = new Map();
+        } else {
+            scope = this._enumScopes.get(name);
+        }
+        if (scope === undefined) {
+            scope = new EnumScope(this);
+            this._enumScopes.set(name, scope);
+        } else {
+            scope.refresh();
+        }
+        return scope;
     }
 
     protected _getDestinationScope(_blockScoped: boolean): Scope {
@@ -133,6 +152,16 @@ class NonRootScope<T extends Scope = Scope> extends AbstractScope {
 
     protected _addUseToParent(use: VariableUse) {
         return this._parent.addUse(use);
+    }
+}
+
+class EnumScope extends NonRootScope {
+    public end() {
+        super.end(() => {});
+    }
+
+    public refresh() {
+        this._uses.length = 0;
     }
 }
 
@@ -238,9 +267,6 @@ class NamespaceScope extends NonRootScope {
                 namespaceVar.domain |= variable.domain;
                 namespaceVar.uses.push(...variable.uses);
             }
-            // take over namespace scope if exported afterwards
-            if (variable.domain & DeclarationDomain.Namespace && this._namespaceScopes.get(key) === undefined)
-                this._namespaceScopes.set(key, this._innerScope.getNamespaceScope(key)!);
         });
         return super.end(cb);
     }
@@ -249,6 +275,12 @@ class NamespaceScope extends NonRootScope {
         if (!exported)
             return this._innerScope.createOrReuseNamespaceScope(name, exported);
         return super.createOrReuseNamespaceScope(name, exported);
+    }
+
+    public createOrReuseEnumScope(name: string, exported: boolean): EnumScope {
+        if (!exported)
+            return this._innerScope.createOrReuseEnumScope(name, exported);
+        return super.createOrReuseEnumScope(name, exported);
     }
 
     public refresh(newParent: Scope) {
@@ -387,12 +419,12 @@ export function collectVariableUsage(sourceFile: ts.SourceFile) {
 }
 
 class UsageWalker {
-    private _result = new Map<ts.PropertyName, VariableInfo>();
+    private _result = new Map<ts.Identifier, VariableInfo>();
     private _scope: Scope;
     public getUsage(sourceFile: ts.SourceFile) {
         const variableCallback = (variable: VariableInfo) => {
             for (const declaration of variable.declarations)
-                this._result.set(declaration, variable);
+                this._result.set(<ts.Identifier>declaration, variable);
         };
         this._scope = new RootScope(!ts.isExternalModule(sourceFile));
         const cb = (node: ts.Node): void => {
@@ -409,8 +441,8 @@ class UsageWalker {
                                                                               isNamespaceExported(<ts.NamespaceDeclaration>node));
                     } else if (isEnumDeclaration(node)) {
                         this._handleDeclaration(node, true, DeclarationDomain.Any);
-                        this._scope = this._scope.createOrReuseNamespaceScope(node.name.text,
-                                                                              hasModifier(node.modifiers, ts.SyntaxKind.ExportKeyword));
+                        this._scope = this._scope.createOrReuseEnumScope(node.name.text,
+                                                                         hasModifier(node.modifiers, ts.SyntaxKind.ExportKeyword));
                     } else {
                         if (isFunctionDeclaration(node) && node.body !== undefined) {
                             this._handleDeclaration(node, false, DeclarationDomain.Value);

@@ -32,3 +32,7 @@ interface Extended<T, U = T> {
 class Extending<T, U> extends Test<T> implements Extended<T> {}
       ~~~~~~~~~ [Unused]
                    ~ [Unused]
+
+class Base {}
+interface ExtendsBase extends Base {}
+          ~~~~~~~~~~~ [Unused]
