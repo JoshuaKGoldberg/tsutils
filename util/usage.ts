@@ -163,7 +163,6 @@ class FunctionExpressionInnerScope extends FunctionScope<FunctionExpressionScope
 
 class FunctionExpressionScope extends NonRootScope {
     private _innerScope = new FunctionExpressionInnerScope(this);
-    private _nameUses: VariableUse[];
 
     constructor(private _name: ts.Identifier, parent: Scope) {
         super(parent);
@@ -176,7 +175,7 @@ class FunctionExpressionScope extends NonRootScope {
                 declarations: [this._name],
                 domain: DeclarationDomain.Value,
                 exported: false,
-                uses: this._nameUses,
+                uses: this._uses,
                 inGlobalScope: false,
             },
             this._name.text,
@@ -189,7 +188,7 @@ class FunctionExpressionScope extends NonRootScope {
 
     public addUseToParent(use: VariableUse) {
         if (use.domain & UsageDomain.Value && use.location.text === this._name.text) {
-            this._nameUses.push(use);
+            this._uses.push(use);
         } else {
             return this._parent.addUse(use);
         }
@@ -308,45 +307,41 @@ function getEntityNameParent(name: ts.EntityName) {
 }
 
 export function getUsageDomain(node: ts.Identifier): UsageDomain | undefined {
-    if (isUsedAsType(node))
-        return UsageDomain.Type;
-    if (node.parent!.kind === ts.SyntaxKind.TypeQuery)
-        return UsageDomain.Value | UsageDomain.TypeQuery;
-    if (isUsedAsValue(node))
-        return UsageDomain.ValueOrNamespace;
-    if (node.parent!.kind === ts.SyntaxKind.QualifiedName && (<ts.QualifiedName>node.parent).left === node)
-        return UsageDomain.Namespace |
-            (getEntityNameParent(<ts.QualifiedName>node.parent).kind === ts.SyntaxKind.TypeQuery ? UsageDomain.TypeQuery : 0);
-    if (node.parent!.kind === ts.SyntaxKind.NamespaceExportDeclaration)
-        return UsageDomain.Namespace;
-}
-
-function isUsedAsType(node: ts.Identifier): boolean {
     const parent = node.parent!;
     switch (parent.kind) {
         case ts.SyntaxKind.TypeReference:
         case ts.SyntaxKind.TypeOperator:
-            return true;
+            return UsageDomain.Type;
         case ts.SyntaxKind.ExpressionWithTypeArguments:
-            return (<ts.HeritageClause>parent.parent).token === ts.SyntaxKind.ImplementsKeyword ||
-                parent.parent!.parent!.kind === ts.SyntaxKind.InterfaceDeclaration;
-        default:
-            return false;
-    }
-}
-
-function isUsedAsValue(node: ts.Identifier): boolean {
-    const parent = node.parent!;
-    switch (parent.kind) {
+            if ((<ts.HeritageClause>parent.parent).token === ts.SyntaxKind.ImplementsKeyword ||
+                parent.parent!.parent!.kind === ts.SyntaxKind.InterfaceDeclaration)
+                return UsageDomain.Type;
+            if ((<ts.HeritageClause>parent.parent).token === ts.SyntaxKind.ExtendsKeyword &&
+                parent.parent!.parent!.kind !== ts.SyntaxKind.InterfaceDeclaration)
+                return UsageDomain.Value;
+            break;
+        case ts.SyntaxKind.TypeQuery:
+            return UsageDomain.ValueOrNamespace | UsageDomain.TypeQuery;
+        case ts.SyntaxKind.QualifiedName:
+            if ((<ts.QualifiedName>parent).left === node) {
+                if (getEntityNameParent(<ts.QualifiedName>parent).kind === ts.SyntaxKind.TypeQuery)
+                    return UsageDomain.Namespace | UsageDomain.TypeQuery;
+                return UsageDomain.Namespace;
+            }
+            break;
+        case ts.SyntaxKind.NamespaceExportDeclaration:
+            return UsageDomain.Namespace;
+        // Value
         case ts.SyntaxKind.BindingElement:
-            return (<ts.BindingElement>parent).initializer === node;
+            if ((<ts.BindingElement>parent).initializer === node)
+                return UsageDomain.ValueOrNamespace;
+            break;
         case ts.SyntaxKind.ExportSpecifier:
             // either {name} or {propertyName as name}
-            return (<ts.ExportSpecifier>parent).propertyName === undefined ||
-                (<ts.ExportSpecifier>parent).propertyName === node;
-        case ts.SyntaxKind.ExpressionWithTypeArguments:
-            return (<ts.HeritageClause>parent.parent).token === ts.SyntaxKind.ExtendsKeyword &&
-                parent.parent!.parent!.kind !== ts.SyntaxKind.InterfaceDeclaration;
+            if ((<ts.ExportSpecifier>parent).propertyName === undefined ||
+                (<ts.ExportSpecifier>parent).propertyName === node)
+                return UsageDomain.ValueOrNamespace;
+            break;
         case ts.SyntaxKind.EnumMember:
         case ts.SyntaxKind.PropertyDeclaration:
         case ts.SyntaxKind.Parameter:
@@ -354,7 +349,9 @@ function isUsedAsValue(node: ts.Identifier): boolean {
         case ts.SyntaxKind.PropertyAssignment:
         case ts.SyntaxKind.PropertyAccessExpression:
         case ts.SyntaxKind.ImportEqualsDeclaration:
-            return (<ts.Declaration>parent).name !== node;
+            if ((<ts.Declaration>parent).name !== node)
+                return UsageDomain.ValueOrNamespace;
+            break;
         case ts.SyntaxKind.JsxAttribute:
         case ts.SyntaxKind.FunctionDeclaration:
         case ts.SyntaxKind.FunctionExpression:
@@ -379,9 +376,9 @@ function isUsedAsValue(node: ts.Identifier): boolean {
         case ts.SyntaxKind.InterfaceDeclaration:
         case ts.SyntaxKind.TypeAliasDeclaration:
         case ts.SyntaxKind.TypeParameter:
-            return false;
+            break;
         default:
-            return true;
+            return UsageDomain.ValueOrNamespace;
     }
 }
 

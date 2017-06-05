@@ -4,15 +4,6 @@ class one {}
 let varOne: typeof one;
     ~~~~~~ [Unused]
 
-class two {}
-namespace ns {
-          ~~ [Unused]
-    namespace two {}
-              ~~~ [Unused]
-    let varTwo: typeof two{}
-        ~~~~~~ [Unused]
-}
-
 interface three {}
 namespace ns {
           ~~ [Unused]

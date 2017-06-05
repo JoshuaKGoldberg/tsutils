@@ -60,3 +60,5 @@ export function testRenamingDestructure() {
   let {x: y} = {x: 7}; // false positive
   return a + y;
 }
+
+setTimeout();
