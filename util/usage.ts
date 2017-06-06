@@ -97,12 +97,8 @@ abstract class AbstractScope implements Scope {
         throw new Error('not supported');
     }
 
-    public markExported(name: ts.Identifier) {
-        const variable = this._variables.get(name.text);
-        if (variable !== undefined)
-            variable.exported = true;
-        // TODO fallback to parent if available
-    }
+    // tslint:disable-next-line:prefer-function-over-method
+    public markExported(_name: ts.Identifier) {} // only relevant for the root scope
 
     public createOrReuseNamespaceScope(name: string, _exported: boolean): NamespaceScope {
         let scope: NamespaceScope | undefined;
@@ -143,7 +139,31 @@ abstract class AbstractScope implements Scope {
     protected _addUseToParent(_use: VariableUse) {} // tslint:disable-line:prefer-function-over-method
 }
 
-class RootScope extends AbstractScope {}
+class RootScope extends AbstractScope {
+    private _exports: string[] | undefined = undefined;
+
+    public markExported({text}: ts.Identifier) {
+        const variable = this._variables.get(text);
+        if (variable !== undefined) {
+            variable.exported = true;
+        } else if (this._exports === undefined) {
+            this._exports = [text];
+        } else {
+            this._exports.push(text);
+        }
+    }
+
+    public end(cb: VariableCallback) {
+        if (this._exports !== undefined) {
+            for (const exported of this._exports) {
+                const variable = this._variables.get(exported);
+                if (variable !== undefined)
+                    variable.exported = true;
+            }
+        }
+        return super.end(cb);
+    }
+}
 
 class NonRootScope<T extends Scope = Scope> extends AbstractScope {
     constructor(protected _parent: T) {
@@ -345,13 +365,10 @@ export function getUsageDomain(node: ts.Identifier): UsageDomain | undefined {
         case ts.SyntaxKind.TypeOperator:
             return UsageDomain.Type;
         case ts.SyntaxKind.ExpressionWithTypeArguments:
-            if ((<ts.HeritageClause>parent.parent).token === ts.SyntaxKind.ImplementsKeyword ||
-                parent.parent!.parent!.kind === ts.SyntaxKind.InterfaceDeclaration)
-                return UsageDomain.Type;
-            if ((<ts.HeritageClause>parent.parent).token === ts.SyntaxKind.ExtendsKeyword &&
-                parent.parent!.parent!.kind !== ts.SyntaxKind.InterfaceDeclaration)
-                return UsageDomain.Value;
-            break;
+            return (<ts.HeritageClause>parent.parent).token === ts.SyntaxKind.ImplementsKeyword ||
+                parent.parent!.parent!.kind === ts.SyntaxKind.InterfaceDeclaration
+                ? UsageDomain.Type
+                : UsageDomain.Value;
         case ts.SyntaxKind.TypeQuery:
             return UsageDomain.ValueOrNamespace | UsageDomain.TypeQuery;
         case ts.SyntaxKind.QualifiedName:
@@ -363,15 +380,17 @@ export function getUsageDomain(node: ts.Identifier): UsageDomain | undefined {
             break;
         case ts.SyntaxKind.NamespaceExportDeclaration:
             return UsageDomain.Namespace;
-        // Value
-        case ts.SyntaxKind.BindingElement:
-            if ((<ts.BindingElement>parent).initializer === node)
-                return UsageDomain.ValueOrNamespace;
-            break;
         case ts.SyntaxKind.ExportSpecifier:
             // either {name} or {propertyName as name}
             if ((<ts.ExportSpecifier>parent).propertyName === undefined ||
                 (<ts.ExportSpecifier>parent).propertyName === node)
+                return UsageDomain.Any;
+            break;
+        case ts.SyntaxKind.ExportAssignment:
+            return UsageDomain.Any;
+        // Value
+        case ts.SyntaxKind.BindingElement:
+            if ((<ts.BindingElement>parent).initializer === node)
                 return UsageDomain.ValueOrNamespace;
             break;
         case ts.SyntaxKind.EnumMember:
@@ -484,13 +503,10 @@ class UsageWalker {
             } else if (isTypeParameterDeclaration(node)) {
                 this._scope.addVariable(node.name.text, node.name, false, false, DeclarationDomain.Type);
             } else if (isExportSpecifier(node)) {
-                this._scope.addUse({location: node.name, domain: UsageDomain.Any});
-                return this._scope.markExported(node.name);
+                return this._scope.markExported(node.propertyName || node.name);
             } else if (isExportAssignment(node)) {
-                if (isIdentifier(node.expression)) {
-                    this._scope.addUse({location: node.expression, domain: UsageDomain.Any});
-                    this._scope.markExported(node.expression);
-                }
+                if (isIdentifier(node.expression))
+                    return this._scope.markExported(node.expression);
             } else if (isIdentifier(node)) {
                 const domain = getUsageDomain(node);
                 if (domain !== undefined)
